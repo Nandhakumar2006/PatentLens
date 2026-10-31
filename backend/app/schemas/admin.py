@@ -7,6 +7,8 @@ from pydantic import BaseModel, EmailStr, Field
 class UserManagementOut(BaseModel):
     id: int
     email: EmailStr
+    username: str | None = None
+    bio_name: str | None = None
     full_name: str
     role: str
     is_active: bool
@@ -18,10 +20,16 @@ class UserManagementOut(BaseModel):
 
 class RoleUpdateRequest(BaseModel):
     role: str = Field(pattern="^(admin|user)$")
+    secret_password: str | None = None
 
 
 class StatusUpdateRequest(BaseModel):
     is_active: bool
+    secret_password: str | None = None
+
+
+class AdminSecretConfirmRequest(BaseModel):
+    secret_password: str
 
 
 class PatentManagementOut(BaseModel):
@@ -86,3 +94,27 @@ class AdminOverviewOut(BaseModel):
     stats: dict
     health: dict
     recent_searches: list[GlobalSearchItem]
+
+
+class IngestionHistoryItemOut(BaseModel):
+    id: int
+    user_id: int | None = None
+    user_name: str | None = None
+    username: str | None = None
+    user_email: str | None = None
+    ingestion_type: str  # "single" or "bulk"
+    status: str = "completed"
+    summary: str
+    details: dict | None = None
+    has_file: bool = False
+    filename: str | None = None
+    created_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class IngestionHistoryListOut(BaseModel):
+    items: list[IngestionHistoryItemOut]
+    total: int
+    page: int
+    page_size: int

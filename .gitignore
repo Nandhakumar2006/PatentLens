@@ -29,7 +29,6 @@ data/indexes/*
 !data/indexes/.gitkeep
 data/raw/*
 !data/raw/.gitkeep
-!data/raw/synthetic_patents_fixture.csv
 
 # Models / large files
 *.bin

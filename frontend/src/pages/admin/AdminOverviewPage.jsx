@@ -90,6 +90,7 @@ export default function AdminOverviewPage() {
               `Vectors Indexed: ${health.faiss_vectors}`,
               `Dimension: ${health.faiss_dimension}d`,
               `Model: ${health.embedding_model || 'N/A'}`,
+              `Device: ${health.acceleration || (health.cuda_available ? 'GPU (CUDA)' : 'CPU (Fallback)')}`,
             ]}
           />
         </div>

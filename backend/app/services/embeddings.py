@@ -7,6 +7,7 @@ import threading
 import numpy as np
 
 from app.core.config import get_settings
+from app.core.device import get_device_name, get_optimal_device, is_cuda_available
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ class EmbeddingService:
         self.dimension = dimension
         self._model = None
         self._lock = threading.Lock()
+        self._active_device: str = "cpu"
 
     def _load_sentence_transformer(self):
         if self._model is not None:
@@ -36,27 +38,64 @@ class EmbeddingService:
             if self._model is None:
                 from sentence_transformers import SentenceTransformer
 
-                logger.info("Loading embedding model %s", self.model_name)
+                target_device = get_optimal_device()
+                logger.info("Attempting to load embedding model %s on %s", self.model_name, target_device)
                 try:
-                    self._model = SentenceTransformer(self.model_name, local_files_only=True)
-                except Exception:
-                    self._model = SentenceTransformer(self.model_name)
+                    try:
+                        self._model = SentenceTransformer(self.model_name, device=target_device, local_files_only=True)
+                    except Exception:
+                        self._model = SentenceTransformer(self.model_name, device=target_device)
+                    self._active_device = target_device
+                    logger.info("Embedding model successfully loaded on %s (%s)", target_device, get_device_name())
+                except Exception as exc:
+                    logger.warning("Failed to load on %s (%s). Falling back to CPU.", target_device, exc)
+                    try:
+                        self._model = SentenceTransformer(self.model_name, device="cpu", local_files_only=True)
+                    except Exception:
+                        self._model = SentenceTransformer(self.model_name, device="cpu")
+                    self._active_device = "cpu"
+
                 self.dimension = int(self._model.get_sentence_embedding_dimension())
         return self._model
 
-    def encode(self, texts: list[str], batch_size: int = 32, show_progress: bool = False) -> np.ndarray:
+    def encode(self, texts: list[str], batch_size: int | None = None, show_progress: bool = False) -> np.ndarray:
         cleaned = [t if t and t.strip() else " " for t in texts]
         if self.backend in {"hash", "test"}:
             return self._hash_encode(cleaned)
         model = self._load_sentence_transformer()
-        vectors = model.encode(
-            cleaned,
-            batch_size=batch_size,
-            show_progress_bar=show_progress,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        )
-        return np.asarray(vectors, dtype=np.float32)
+
+        if batch_size is None:
+            batch_size = 64 if self._active_device == "cuda" else 32
+
+        try:
+            vectors = model.encode(
+                cleaned,
+                batch_size=batch_size,
+                show_progress_bar=show_progress,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                device=self._active_device,
+            )
+            return np.asarray(vectors, dtype=np.float32)
+        except Exception as exc:
+            if self._active_device == "cuda":
+                logger.warning("GPU encoding failed (%s). Automatically falling back to CPU.", exc)
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                self._active_device = "cpu"
+                vectors = model.encode(
+                    cleaned,
+                    batch_size=32,
+                    show_progress_bar=show_progress,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                    device="cpu",
+                )
+                return np.asarray(vectors, dtype=np.float32)
+            raise
 
     def encode_query(self, text: str) -> np.ndarray:
         if self.backend not in {"hash", "test"} and "bge" in self.model_name.lower():

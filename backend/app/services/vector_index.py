@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 from app.core.config import get_settings
+from app.core.device import get_device_name, get_system_hardware_info, is_cuda_available
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,7 @@ class VectorIndex:
         self.meta: dict = {}
         self.backend = "unloaded"
         self._numpy_vectors: np.ndarray | None = None
+        self._gpu_vectors: Any | None = None
 
     @property
     def loaded(self) -> bool:
@@ -28,6 +31,8 @@ class VectorIndex:
         index_path = Path(settings.FAISS_INDEX_PATH)
         mapping_path = Path(settings.FAISS_MAPPING_PATH)
         meta_path = Path(settings.FAISS_META_PATH)
+        hw = get_system_hardware_info()
+
         return {
             "ok": self.loaded,
             "backend": self.backend,
@@ -35,6 +40,9 @@ class VectorIndex:
             "dimension": self.dimension,
             "model_name": self.meta.get("model_name"),
             "embedding_backend": self.meta.get("embedding_backend"),
+            "hardware": hw,
+            "acceleration": "GPU (CUDA)" if hw.get("cuda_available") else "CPU (Fallback)",
+            "device_name": hw.get("device_name", "CPU"),
             "index_exists": index_path.exists(),
             "mapping_exists": mapping_path.exists(),
             "meta_exists": meta_path.exists(),
@@ -73,6 +81,7 @@ class VectorIndex:
             self.index = None
             self._numpy_vectors = vectors
             self.backend = "numpy-IndexFlatIP-compatible"
+        self._gpu_vectors = None
         self.mapping = mapping
         self.meta = meta
 
@@ -108,6 +117,7 @@ class VectorIndex:
             return False
         self.mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
         self.meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        self._gpu_vectors = None
         faiss = _try_import_faiss()
         if index_path.exists() and faiss is not None:
             self.index = faiss.read_index(str(index_path))
@@ -128,6 +138,30 @@ class VectorIndex:
         logger.warning("No FAISS or NumPy index file found")
         return False
 
+    def _ensure_gpu_vectors(self) -> Any | None:
+        """Transfers vectors to GPU memory for accelerated matrix search when CUDA is available."""
+        if not is_cuda_available():
+            return None
+        if self._gpu_vectors is not None:
+            return self._gpu_vectors
+        try:
+            import torch
+
+            vecs = None
+            if self._numpy_vectors is not None:
+                vecs = self._numpy_vectors
+            elif self.index is not None and hasattr(self.index, "reconstruct_n"):
+                vecs = self.index.reconstruct_n(0, self.index.ntotal)
+
+            if vecs is not None:
+                self._gpu_vectors = torch.from_numpy(vecs).to("cuda", non_blocking=True)
+                logger.info("Transferred %d vectors to GPU for accelerated matrix search", len(vecs))
+                return self._gpu_vectors
+        except Exception as exc:
+            logger.warning("Could not allocate GPU vectors (%s). Falling back to CPU search.", exc)
+            self._gpu_vectors = None
+        return None
+
     def search(self, query_vector: np.ndarray, top_k: int) -> list[tuple[int, float]]:
         if not self.loaded:
             raise RuntimeError("Vector index is not loaded")
@@ -135,6 +169,30 @@ class VectorIndex:
         k = min(top_k, self.ntotal)
         if k <= 0:
             return []
+
+        # 1. High-Speed GPU Matrix Dot-Product & Top-K (if CUDA is available)
+        gpu_vecs = self._ensure_gpu_vectors()
+        if gpu_vecs is not None:
+            try:
+                import torch
+
+                q_tensor = torch.from_numpy(q).to("cuda", non_blocking=True)
+                scores_tensor = torch.matmul(q_tensor, gpu_vecs.t()).squeeze(0)
+                top_scores, top_indices = torch.topk(scores_tensor, k)
+
+                scores_cpu = top_scores.cpu().numpy()
+                indices_cpu = top_indices.cpu().numpy()
+                return [(int(idx), float(sc)) for idx, sc in zip(indices_cpu, scores_cpu) if idx >= 0]
+            except Exception as exc:
+                logger.warning("GPU search failed (%s). Falling back to CPU.", exc)
+                try:
+                    import torch
+
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+
+        # 2. CPU Fallback (FAISS IndexFlatIP or NumPy)
         if self.index is not None:
             scores, ids = self.index.search(q, k)
             pairs = []
@@ -143,6 +201,7 @@ class VectorIndex:
                     continue
                 pairs.append((int(vid), float(score)))
             return pairs
+
         scores = (self._numpy_vectors @ q.T).ravel()
         if k >= len(scores):
             order = np.argsort(-scores)
@@ -196,7 +255,8 @@ def rebuild_index_from_database(db) -> dict:
 
     embedder = get_embedding_service()
     texts = [c.text for c in chunks]
-    vectors = embedder.encode(texts, batch_size=32)
+    batch_size = 64 if is_cuda_available() else 32
+    vectors = embedder.encode(texts, batch_size=batch_size)
 
     mapping = []
     for vid, chunk in enumerate(chunks):
@@ -222,9 +282,10 @@ def rebuild_index_from_database(db) -> dict:
     index.save()
 
     reload_vector_index()
+    device_label = get_device_name()
     return {
         "success": True,
         "total_vectors": int(vectors.shape[0]),
         "dimension": int(vectors.shape[1]),
-        "message": f"Successfully indexed {len(vectors)} vector chunks",
+        "message": f"Successfully indexed {len(vectors)} vector chunks on {device_label}",
     }

@@ -6,10 +6,19 @@ export const adminApi = {
   // User management
   users: (page = 1, pageSize = 20) =>
     api.get('/admin/users', { params: { page, page_size: pageSize } }).then((r) => r.data),
-  updateRole: (userId, role) =>
-    api.patch(`/admin/users/${userId}/role`, { role }).then((r) => r.data),
-  updateStatus: (userId, isActive) =>
-    api.patch(`/admin/users/${userId}/status`, { is_active: isActive }).then((r) => r.data),
+  updateRole: (userId, role, secretPassword) =>
+    api.patch(`/admin/users/${userId}/role`, { role, secret_password: secretPassword }, {
+      headers: { 'X-Admin-Secret': secretPassword },
+    }).then((r) => r.data),
+  updateStatus: (userId, isActive, secretPassword) =>
+    api.patch(`/admin/users/${userId}/status`, { is_active: isActive, secret_password: secretPassword }, {
+      headers: { 'X-Admin-Secret': secretPassword },
+    }).then((r) => r.data),
+  deleteUser: (userId, secretPassword) =>
+    api.delete(`/admin/users/${userId}`, {
+      data: { secret_password: secretPassword },
+      headers: { 'X-Admin-Secret': secretPassword },
+    }).then((r) => r.data),
 
   // Patent management
   patents: (page = 1, pageSize = 20, q = '') =>
@@ -39,6 +48,30 @@ export const adminApi = {
     data.append('file', file)
     return api.post('/admin/ingest/process-csv', data).then((r) => r.data)
   },
+
+  // Ingestion History
+  ingestionHistory: (page = 1, pageSize = 20) =>
+    api.get('/admin/ingest/history', { params: { page, page_size: pageSize } }).then((r) => r.data),
+  ingestionHistoryContent: (id) =>
+    api.get(`/admin/ingest/history/${id}/content`).then((r) => r.data),
+  downloadIngestedFile: async (id, filename) => {
+    const response = await api.get(`/admin/ingest/history/${id}/download`, { responseType: 'blob' })
+    const url = URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename || `ingestion_${id}.csv`
+    link.click()
+    URL.revokeObjectURL(url)
+  },
+  deleteIngestionHistory: (id, secretPassword) =>
+    api.delete(`/admin/ingest/history/${id}`, {
+      data: { secret_password: secretPassword },
+      headers: { 'X-Admin-Secret': secretPassword },
+    }).then((r) => r.data),
+  clearAllIngestionHistory: (secretPassword) =>
+    api.post('/admin/ingest/history/clear', { secret_password: secretPassword }, {
+      headers: { 'X-Admin-Secret': secretPassword },
+    }).then((r) => r.data),
 
   // Index management
   rebuildIndex: () => api.post('/admin/index/rebuild').then((r) => r.data),

@@ -1,30 +1,58 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { UserPlus, Eye, EyeOff, Lock, Mail, User } from 'lucide-react'
+import { UserPlus, Eye, EyeOff, Lock, Mail, AtSign, FileText } from 'lucide-react'
 import ErrorState from '../components/ErrorState'
 import { useAuth } from '../hooks/AuthContext'
 import { useToast } from '../hooks/ToastContext'
+
+const USERNAME_REGEX = /^[a-zA-Z0-9$_-]+$/
+const BIONAME_REGEX = /^[a-zA-Z\s]+$/
 
 export default function RegisterPage() {
   const { login } = useAuth()
   const navigate = useNavigate()
   const toast = useToast()
-  const [form, setForm] = useState({ full_name: '', email: '', password: '' })
+  const [form, setForm] = useState({ username: '', bio_name: '', email: '', password: '' })
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
   async function onSubmit(e) {
     e.preventDefault()
+    setError('')
+
+    const cleanUsername = form.username.trim()
+    const cleanBio = form.bio_name.trim()
+
+    if (cleanUsername.length < 3) {
+      setError('Username must be at least 3 characters long.')
+      return
+    }
+
+    if (!USERNAME_REGEX.test(cleanUsername)) {
+      setError('Username can only contain letters, numbers, dollar ($), underscore (_), and hyphen (-).')
+      return
+    }
+
+    if (!cleanBio || !BIONAME_REGEX.test(cleanBio) || !/[a-zA-Z]/.test(cleanBio)) {
+      setError('Bio name must contain only letters.')
+      return
+    }
+
     if (form.password.length < 8) {
       setError('Password must be at least 8 characters long.')
       return
     }
+
     setBusy(true)
-    setError('')
     try {
-      await login(form, 'register')
-      toast.success('Account created!')
+      await login({
+        username: cleanUsername,
+        bio_name: cleanBio,
+        email: form.email.trim(),
+        password: form.password,
+      }, 'register')
+      toast.success('Account created successfully!')
       navigate('/app')
     } catch (err) {
       setError(err.message)
@@ -34,7 +62,7 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="container" style={{ maxWidth: 440, padding: '48px 16px' }}>
+    <div className="container" style={{ maxWidth: 460, padding: '48px 16px' }}>
       <div style={{ textAlign: 'center', marginBottom: 24 }}>
         <div className="brand-icon-wrapper" style={{ margin: '0 auto 12px', width: 36, height: 36, fontSize: '1rem', fontWeight: 800 }}>
           PL
@@ -50,17 +78,40 @@ export default function RegisterPage() {
 
         <form className="form-stack" onSubmit={onSubmit}>
           <div>
-            <label className="label" htmlFor="name">
-              <User size={13} className="text-muted" />
-              <span>Full Name</span>
+            <label className="label" htmlFor="username">
+              <AtSign size={13} className="text-muted" />
+              <span>Username</span>
+              <span className="label-hint" style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                (letters, numbers, $, _, - • permanent)
+              </span>
             </label>
             <input
-              id="name"
+              id="username"
               type="text"
               required
-              placeholder="Dr. Jane Doe"
-              value={form.full_name}
-              onChange={(e) => setForm({ ...form, full_name: e.target.value })}
+              minLength={3}
+              maxLength={64}
+              placeholder="e.g. Nandha_01 or Alex$99"
+              value={form.username}
+              onChange={(e) => setForm({ ...form, username: e.target.value })}
+            />
+          </div>
+
+          <div>
+            <label className="label" htmlFor="bio_name">
+              <FileText size={13} className="text-muted" />
+              <span>Bio Name</span>
+              <span className="label-hint" style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                (letters only • editable after 14 days)
+              </span>
+            </label>
+            <input
+              id="bio_name"
+              type="text"
+              required
+              placeholder="e.g. Nandhakumar"
+              value={form.bio_name}
+              onChange={(e) => setForm({ ...form, bio_name: e.target.value })}
             />
           </div>
 
@@ -73,7 +124,7 @@ export default function RegisterPage() {
               id="email"
               type="email"
               required
-              placeholder="jane@university.edu"
+              placeholder="innovator@company.com"
               value={form.email}
               onChange={(e) => setForm({ ...form, email: e.target.value })}
             />

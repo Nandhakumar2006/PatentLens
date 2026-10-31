@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { LogIn, Eye, EyeOff, Lock, Mail } from 'lucide-react'
+import { LogIn, Eye, EyeOff, Lock, User } from 'lucide-react'
 import ErrorState from '../components/ErrorState'
 import { useAuth } from '../hooks/AuthContext'
 import { useToast } from '../hooks/ToastContext'
@@ -9,7 +9,7 @@ export default function LoginPage() {
   const { login } = useAuth()
   const navigate = useNavigate()
   const toast = useToast()
-  const [form, setForm] = useState({ email: '', password: '' })
+  const [form, setForm] = useState({ identifier: '', password: '' })
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -29,8 +29,8 @@ export default function LoginPage() {
     }
   }
 
-  function fillDemoUser() {
-    setForm({ email: 'test@patentlens.ai', password: 'password123' })
+  function fillDemoAdmin() {
+    setForm({ identifier: 'Nandha-01', password: 'nandha123' })
   }
 
   return (
@@ -41,7 +41,7 @@ export default function LoginPage() {
         </div>
         <h1 style={{ fontSize: '1.5rem', marginBottom: 4 }}>Sign in to PatentLens</h1>
         <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', margin: 0 }}>
-          Enter your credentials to access prior-art tools
+          Enter your username or email to access prior-art tools
         </p>
       </div>
 
@@ -50,17 +50,19 @@ export default function LoginPage() {
         
         <form className="form-stack" onSubmit={onSubmit}>
           <div>
-            <label className="label" htmlFor="email">
-              <Mail size={13} className="text-muted" />
-              <span>Email address</span>
+            <label className="label" htmlFor="identifier">
+              <User size={13} className="text-muted" />
+              <span>Username or Email</span>
             </label>
             <input
-              id="email"
-              type="email"
+              id="identifier"
+              type="text"
               required
-              placeholder="innovator@company.com"
-              value={form.email}
-              onChange={(e) => setForm({ ...form, email: e.target.value })}
+              autoCapitalize="none"
+              autoCorrect="off"
+              placeholder="Username (e.g. Nandha-01) or email"
+              value={form.identifier}
+              onChange={(e) => setForm({ ...form, identifier: e.target.value })}
             />
           </div>
 
@@ -121,10 +123,10 @@ export default function LoginPage() {
           <button
             type="button"
             className="btn ghost btn-sm"
-            onClick={fillDemoUser}
+            onClick={fillDemoAdmin}
             style={{ fontSize: '0.78rem', color: 'var(--accent-orange)', margin: '0 auto' }}
           >
-            Fill Demo Credentials
+            Fill Predefined Admin (Nandha-01)
           </button>
         </div>
       </div>

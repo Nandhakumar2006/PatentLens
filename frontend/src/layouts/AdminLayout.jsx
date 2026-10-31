@@ -86,7 +86,7 @@ export default function AdminLayout() {
             <span>Sign Out</span>
           </button>
           <div style={{ padding: '8px 12px', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-            Signed in as <span style={{ color: 'var(--accent-orange)' }}>{user.full_name}</span>
+            Signed in as <span style={{ color: 'var(--accent-orange)' }}>{user.bio_name || user.full_name} (@{user.username})</span>
           </div>
         </div>
       </aside>

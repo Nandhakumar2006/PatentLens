@@ -1,5 +1,6 @@
 from app.models.chunk import PatentChunk
 from app.models.claim import Claim
+from app.models.ingestion_history import IngestionHistory
 from app.models.patent import Patent
 from app.models.report import Report
 from app.models.saved_patent import SavedPatent
@@ -15,4 +16,5 @@ __all__ = [
     "SearchResult",
     "SavedPatent",
     "Report",
+    "IngestionHistory",
 ]

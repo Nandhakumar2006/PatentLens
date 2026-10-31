@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import csv
 import io
+import json
+import re
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Response, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import get_settings
 from app.core.security import get_current_admin
 from app.db.session import database_status, get_db
 from app.models.chunk import PatentChunk
 from app.models.claim import Claim
+from app.models.ingestion_history import IngestionHistory
 from app.models.patent import Patent
 from app.models.report import Report
 from app.models.saved_patent import SavedPatent
@@ -20,9 +26,12 @@ from app.models.search import Search
 from app.models.user import User
 from app.schemas.admin import (
     AdminOverviewOut,
+    AdminSecretConfirmRequest,
     CsvValidationOut,
     GlobalSearchItem,
     IndexRebuildOut,
+    IngestionHistoryItemOut,
+    IngestionHistoryListOut,
     IngestionResultOut,
     PatentManagementOut,
     RoleUpdateRequest,
@@ -63,6 +72,16 @@ CSV_TEMPLATE_COLUMNS = [
 REQUIRED_CSV_COLUMNS = MANDATORY_CSV_COLUMNS
 
 PREDEFINED_PRIMARY_ADMIN = "nandhakumar2006@gmail.com"
+
+
+def check_admin_secret(secret_password: Optional[str] = None, header_secret: Optional[str] = None):
+    settings = get_settings()
+    candidate = (secret_password or header_secret or "").strip()
+    if not candidate or candidate != settings.ADMIN_ACTION_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid secret authorization password. Action prohibited.",
+        )
 
 
 @router.get("/overview", response_model=AdminOverviewOut)
@@ -116,6 +135,9 @@ def admin_overview(db: Session = Depends(get_db)):
             "faiss_vectors": index_status.get("vector_count", 0),
             "faiss_dimension": index_status.get("dimension", 384),
             "embedding_model": index_status.get("model_name", "BAAI/bge-small-en-v1.5"),
+            "acceleration": index_status.get("acceleration", "CPU (Fallback)"),
+            "device_name": index_status.get("device_name", "CPU"),
+            "cuda_available": index_status.get("hardware", {}).get("cuda_available", False),
         },
         recent_searches=recent_items,
     )
@@ -142,6 +164,8 @@ def list_users(
             UserManagementOut(
                 id=u.id,
                 email=u.email,
+                username=getattr(u, "username", None),
+                bio_name=getattr(u, "bio_name", None),
                 full_name=u.full_name,
                 role=getattr(u, "role", "user"),
                 is_active=getattr(u, "is_active", True),
@@ -157,14 +181,18 @@ def list_users(
 def update_user_role(
     user_id: int,
     payload: RoleUpdateRequest,
+    x_admin_secret: Optional[str] = Header(None, alias="X-Admin-Secret"),
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
+    check_admin_secret(payload.secret_password, x_admin_secret)
     target = db.get(User, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
     if target.email.lower() == PREDEFINED_PRIMARY_ADMIN and payload.role != "admin":
         raise HTTPException(status_code=400, detail="Cannot demote the primary predefined administrator")
+    if target.id == admin.id and payload.role != "admin":
+        raise HTTPException(status_code=400, detail="Cannot demote your own administrator account")
     target.role = payload.role
     db.commit()
     return {"id": target.id, "email": target.email, "role": target.role}
@@ -174,17 +202,61 @@ def update_user_role(
 def update_user_status(
     user_id: int,
     payload: StatusUpdateRequest,
+    x_admin_secret: Optional[str] = Header(None, alias="X-Admin-Secret"),
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
+    check_admin_secret(payload.secret_password, x_admin_secret)
     target = db.get(User, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
     if target.email.lower() == PREDEFINED_PRIMARY_ADMIN and not payload.is_active:
         raise HTTPException(status_code=400, detail="Cannot deactivate the primary predefined administrator")
+    if target.id == admin.id and not payload.is_active:
+        raise HTTPException(status_code=400, detail="Cannot suspend your own administrator account")
     target.is_active = payload.is_active
     db.commit()
     return {"id": target.id, "email": target.email, "is_active": target.is_active}
+
+
+@router.delete("/users/{user_id}")
+@router.post("/users/{user_id}/delete")
+def delete_user(
+    user_id: int,
+    payload: Optional[AdminSecretConfirmRequest] = None,
+    x_admin_secret: Optional[str] = Header(None, alias="X-Admin-Secret"),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    check_admin_secret(payload.secret_password if payload else None, x_admin_secret)
+
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.email.lower() == PREDEFINED_PRIMARY_ADMIN.lower():
+        raise HTTPException(status_code=400, detail="Cannot delete the primary predefined administrator")
+    if target.id == admin.id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own administrator account")
+    if target.role == "admin":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete an administrator account directly. The user must first be demoted to a regular user.",
+        )
+
+    # Cascade user records
+    db.query(SavedPatent).filter(SavedPatent.user_id == target.id).delete()
+    searches = db.scalars(select(Search).where(Search.user_id == target.id)).all()
+    for s in searches:
+        db.delete(s)
+    db.query(Report).filter(Report.user_id == target.id).delete()
+
+    # Nullify user_id on ingestion history to retain audit logs
+    db.query(IngestionHistory).filter(IngestionHistory.user_id == target.id).update({"user_id": None})
+
+    user_label = f"@{target.username}" if getattr(target, "username", None) else target.email
+    db.delete(target)
+    db.commit()
+    return {"message": f"User {user_label} successfully removed", "id": user_id}
 
 
 @router.get("/patents")
@@ -241,7 +313,11 @@ def delete_patent(patent_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/patents/single")
-def create_single_patent(payload: SinglePatentCreateRequest, db: Session = Depends(get_db)):
+def create_single_patent(
+    payload: SinglePatentCreateRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
     existing = db.scalar(select(Patent).where(Patent.patent_id == payload.patent_id.strip()))
     if existing:
         raise HTTPException(status_code=409, detail=f"Patent ID '{payload.patent_id}' already exists")
@@ -272,6 +348,29 @@ def create_single_patent(payload: SinglePatentCreateRequest, db: Session = Depen
     for chunk in build_chunks(cleaned_dict):
         db.add(PatentChunk(patent_id=patent.id, **chunk, vector_id=None))
 
+    # Log ingestion history for single patent
+    single_details = {
+        "patent_id": patent.patent_id,
+        "title": patent.title,
+        "abstract": patent.abstract,
+        "claims": payload.claims or "",
+        "description": patent.description,
+        "inventor": patent.inventor,
+        "country": patent.country,
+        "publication_date": str(patent.publication_date) if patent.publication_date else None,
+        "publication_number": patent.publication_number,
+        "source_url": patent.source_url,
+    }
+    history_entry = IngestionHistory(
+        user_id=admin.id,
+        ingestion_type="single",
+        status="completed",
+        summary=f"Single Patent: {patent.patent_id} — {patent.title}",
+        details_json=json.dumps(single_details),
+        file_path=None,
+    )
+    db.add(history_entry)
+
     db.commit()
     db.refresh(patent)
     return {"id": patent.id, "patent_id": patent.patent_id, "message": "Patent created successfully"}
@@ -282,7 +381,6 @@ def download_csv_template():
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(CSV_TEMPLATE_COLUMNS)
-    # Add 2 sample rows with all standard template columns
     writer.writerow([
         "US-2024-0012345-A1",
         "US11223344B2",
@@ -342,11 +440,9 @@ async def validate_csv(file: UploadFile = File(...)):
             message="CSV file is empty or has no header row",
         )
 
-    # Sanitize detected headers: strip and lowercase
     raw_headers = [h.strip() for h in reader.fieldnames if h]
     normalized_detected = [h.strip().lower() for h in raw_headers]
 
-    # Check for missing required columns
     missing = [col for col in REQUIRED_CSV_COLUMNS if col not in normalized_detected]
     is_valid = len(missing) == 0
 
@@ -355,7 +451,6 @@ async def validate_csv(file: UploadFile = File(...)):
     for idx, row in enumerate(reader):
         total_rows += 1
         if idx < 3:
-            # Clean preview keys
             cleaned_row = {k.strip().lower(): v.strip() for k, v in row.items() if k}
             preview_rows.append(cleaned_row)
 
@@ -376,7 +471,11 @@ async def validate_csv(file: UploadFile = File(...)):
 
 
 @router.post("/ingest/process-csv", response_model=IngestionResultOut)
-async def process_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def process_csv(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only .csv files are supported")
 
@@ -398,15 +497,26 @@ async def process_csv(file: UploadFile = File(...), db: Session = Depends(get_db
             detail=f"CSV does not match required structure. Missing: {', '.join(missing)}",
         )
 
+    # Persist the uploaded CSV file so it can be viewed and downloaded later
+    settings = get_settings()
+    ingestions_dir = Path(settings.UPLOAD_DIR).parent / "ingestions"
+    ingestions_dir.mkdir(parents=True, exist_ok=True)
+    timestamp_prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
+    clean_filename = re.sub(r"[^a-zA-Z0-9_.-]", "_", file.filename)
+    saved_filepath = ingestions_dir / f"{timestamp_prefix}_{clean_filename}"
+    saved_filepath.write_bytes(content)
+
     created = 0
     updated = 0
     skipped = 0
     pending_batch = []
+    preview_sample = []
 
-    for row in reader:
-        # Standardize keys
+    for idx, row in enumerate(reader):
         normalized_row = {k.strip().lower(): v for k, v in row.items() if k}
-        # Enforce that all mandatory columns are present and non-empty
+        if idx < 10:
+            preview_sample.append(normalized_row)
+
         if not all((normalized_row.get(col) or "").strip() for col in MANDATORY_CSV_COLUMNS):
             skipped += 1
             continue
@@ -426,7 +536,27 @@ async def process_csv(file: UploadFile = File(...), db: Session = Depends(get_db
         created += c
         updated += u
 
+    # Record IngestionHistory
+    bulk_details = {
+        "filename": file.filename,
+        "filesize": len(content),
+        "total_processed": created + updated,
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "preview": preview_sample,
+    }
+    history_entry = IngestionHistory(
+        user_id=admin.id,
+        ingestion_type="bulk",
+        status="completed",
+        summary=f"Bulk CSV: {file.filename} ({created} created, {updated} updated, {skipped} skipped)",
+        details_json=json.dumps(bulk_details),
+        file_path=str(saved_filepath),
+    )
+    db.add(history_entry)
     db.commit()
+
     return IngestionResultOut(
         created=created,
         updated=updated,
@@ -454,7 +584,6 @@ def _flush_admin_batch(db: Session, rows: list[dict]) -> tuple[int, int]:
         else:
             for key, value in row.items():
                 setattr(patent, key, value)
-            # Remove old child records cleanly before inserting new ones
             db.query(Claim).filter(Claim.patent_id == patent.id).delete()
             db.query(PatentChunk).filter(PatentChunk.patent_id == patent.id).delete()
             db.flush()
@@ -470,6 +599,7 @@ def _flush_admin_batch(db: Session, rows: list[dict]) -> tuple[int, int]:
 
         for chunk in build_chunks(row):
             db.add(PatentChunk(patent_id=patent.id, **chunk, vector_id=None))
+
     db.flush()
     return created, updated
 
@@ -478,6 +608,199 @@ def _flush_admin_batch(db: Session, rows: list[dict]) -> tuple[int, int]:
 def trigger_index_rebuild(db: Session = Depends(get_db)):
     result = rebuild_index_from_database(db)
     return IndexRebuildOut(**result)
+
+
+@router.get("/ingest/history", response_model=IngestionHistoryListOut)
+def list_ingestion_history(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    total = db.scalar(select(func.count(IngestionHistory.id))) or 0
+    records = db.scalars(
+        select(IngestionHistory)
+        .options(selectinload(IngestionHistory.user))
+        .order_by(desc(IngestionHistory.created_at))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+
+    items = []
+    for r in records:
+        details_obj = None
+        if r.details_json:
+            try:
+                details_obj = json.loads(r.details_json)
+            except Exception:
+                details_obj = {"raw": r.details_json}
+
+        has_file = bool(r.file_path and Path(r.file_path).exists())
+        fname = details_obj.get("filename") if isinstance(details_obj, dict) else None
+
+        items.append(
+            IngestionHistoryItemOut(
+                id=r.id,
+                user_id=r.user_id,
+                user_name=r.user.bio_name if r.user and getattr(r.user, "bio_name", None) else (r.user.full_name if r.user else "System"),
+                username=getattr(r.user, "username", None) if r.user else None,
+                user_email=r.user.email if r.user else "system@patentlens.ai",
+                ingestion_type=r.ingestion_type,
+                status=r.status,
+                summary=r.summary,
+                details=details_obj,
+                has_file=has_file,
+                filename=fname,
+                created_at=r.created_at,
+            )
+        )
+
+    return IngestionHistoryListOut(items=items, total=total, page=page, page_size=page_size)
+
+
+@router.get("/ingest/history/{history_id}/download")
+def download_ingested_file(history_id: int, db: Session = Depends(get_db)):
+    rec = db.get(IngestionHistory, history_id)
+    if not rec or not rec.file_path:
+        raise HTTPException(status_code=404, detail="Ingestion record or file not found")
+
+    path = Path(rec.file_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File no longer exists on disk")
+
+    details_obj = {}
+    if rec.details_json:
+        try:
+            details_obj = json.loads(rec.details_json)
+        except Exception:
+            pass
+
+    orig_name = details_obj.get("filename") or path.name
+    return FileResponse(
+        path=str(path),
+        media_type="text/csv",
+        filename=orig_name,
+        headers={"Content-Disposition": f'attachment; filename="{orig_name}"'},
+    )
+
+
+@router.get("/ingest/history/{history_id}/content")
+def view_ingested_file_content(history_id: int, db: Session = Depends(get_db)):
+    rec = db.get(IngestionHistory, history_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Ingestion record not found")
+
+    details_obj = {}
+    if rec.details_json:
+        try:
+            details_obj = json.loads(rec.details_json)
+        except Exception:
+            pass
+
+    if rec.ingestion_type == "single":
+        return {
+            "type": "single",
+            "summary": rec.summary,
+            "details": details_obj,
+        }
+
+    if not rec.file_path or not Path(rec.file_path).exists():
+        return {
+            "type": "bulk",
+            "summary": rec.summary,
+            "details": details_obj,
+            "headers": [],
+            "rows": details_obj.get("preview", []),
+            "total_rows_preview": len(details_obj.get("preview", [])),
+            "file_missing": True,
+        }
+
+    try:
+        content_bytes = Path(rec.file_path).read_bytes()
+        try:
+            text_str = content_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text_str = content_bytes.decode("latin-1")
+
+        reader = csv.DictReader(io.StringIO(text_str))
+        headers = reader.fieldnames or []
+        rows = []
+        for i, row in enumerate(reader):
+            if i >= 100:
+                break
+            rows.append(row)
+
+        return {
+            "type": "bulk",
+            "summary": rec.summary,
+            "filename": details_obj.get("filename", Path(rec.file_path).name),
+            "filesize": len(content_bytes),
+            "headers": headers,
+            "rows": rows,
+            "total_rows_preview": len(rows),
+            "created": details_obj.get("created", 0),
+            "updated": details_obj.get("updated", 0),
+            "skipped": details_obj.get("skipped", 0),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read CSV file: {str(e)}")
+
+
+@router.delete("/ingest/history/{history_id}")
+@router.post("/ingest/history/{history_id}/delete")
+def delete_ingestion_history_item(
+    history_id: int,
+    payload: Optional[AdminSecretConfirmRequest] = None,
+    x_admin_secret: Optional[str] = Header(None, alias="X-Admin-Secret"),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    check_admin_secret(payload.secret_password if payload else None, x_admin_secret)
+
+    rec = db.get(IngestionHistory, history_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Ingestion record not found")
+
+    # Delete physical file on disk if bulk CSV
+    if rec.file_path:
+        try:
+            p = Path(rec.file_path)
+            if p.exists() and p.is_file():
+                p.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    db.delete(rec)
+    db.commit()
+    return {"message": f"Ingestion record #{history_id} successfully deleted", "id": history_id}
+
+
+@router.post("/ingest/history/clear")
+@router.delete("/ingest/history")
+def clear_all_ingestion_history(
+    payload: Optional[AdminSecretConfirmRequest] = None,
+    x_admin_secret: Optional[str] = Header(None, alias="X-Admin-Secret"),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    check_admin_secret(payload.secret_password if payload else None, x_admin_secret)
+
+    records = db.scalars(select(IngestionHistory)).all()
+    count = len(records)
+    for r in records:
+        if r.file_path:
+            try:
+                p = Path(r.file_path)
+                if p.exists() and p.is_file():
+                    p.unlink(missing_ok=True)
+            except Exception:
+                pass
+        db.delete(r)
+
+    db.commit()
+    return {
+        "message": f"Successfully cleared all {count} ingestion history records and files",
+        "deleted_count": count,
+    }
 
 
 @router.get("/analytics/searches")

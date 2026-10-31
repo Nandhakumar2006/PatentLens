@@ -94,12 +94,12 @@ export default function Navbar() {
               )}
 
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 12 }}>
-                <div className="user-menu-pill" title={user.email}>
+                <div className="user-menu-pill" title={`@${user.username || ''} (${user.email})`}>
                   <div className="user-avatar">
-                    {user.full_name?.charAt(0)?.toUpperCase() || 'U'}
+                    {(user.bio_name || user.full_name || 'U').charAt(0).toUpperCase()}
                   </div>
-                  <span style={{ maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
-                    {user.full_name?.split(' ')[0] || 'User'}
+                  <span style={{ maxWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
+                    {user.bio_name?.split(' ')[0] || user.username || 'User'}
                   </span>
                 </div>
                 <button

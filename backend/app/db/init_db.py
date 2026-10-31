@@ -11,12 +11,13 @@ from app.models.user import User
 logger = logging.getLogger(__name__)
 
 PREDEFINED_ADMIN_EMAIL = "nandhakumar2006@gmail.com"
+PREDEFINED_ADMIN_USERNAME = "Nandha-01"
+PREDEFINED_ADMIN_BIONAME = "Nandhakumar"
 PREDEFINED_ADMIN_PASS = "nandha123"
-PREDEFINED_ADMIN_NAME = "Nandhakumar (Admin)"
 
 
 def migrate_schema():
-    """Ensure `role` and `is_active` columns exist in users table across SQLite & MySQL."""
+    """Ensure `role`, `is_active`, `username`, `bio_name`, and `bio_name_updated_at` columns exist."""
     try:
         inspector = inspect(engine)
         if "users" in inspector.get_table_names():
@@ -28,34 +29,50 @@ def migrate_schema():
                 if "is_active" not in columns:
                     logger.info("Adding 'is_active' column to users table...")
                     conn.execute(text("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT 1 NOT NULL"))
+                if "username" not in columns:
+                    logger.info("Adding 'username' column to users table...")
+                    conn.execute(text("ALTER TABLE users ADD COLUMN username VARCHAR(64) NULL"))
+                if "bio_name" not in columns:
+                    logger.info("Adding 'bio_name' column to users table...")
+                    conn.execute(text("ALTER TABLE users ADD COLUMN bio_name VARCHAR(255) NULL"))
+                if "bio_name_updated_at" not in columns:
+                    logger.info("Adding 'bio_name_updated_at' column to users table...")
+                    conn.execute(text("ALTER TABLE users ADD COLUMN bio_name_updated_at DATETIME NULL"))
     except Exception as exc:
         logger.warning("Schema migration warning: %s", exc)
 
 
 def seed_admin_user():
-    """Ensure the predefined admin user exists and has admin privileges."""
+    """Ensure the predefined admin user exists and has admin privileges with exact username and bio name."""
     db: Session = SessionLocal()
     try:
-        admin = db.query(User).filter(User.email == PREDEFINED_ADMIN_EMAIL).first()
+        admin = db.query(User).filter(
+            (User.email == PREDEFINED_ADMIN_EMAIL) | (User.username == PREDEFINED_ADMIN_USERNAME)
+        ).first()
+
         if admin is None:
             admin = User(
                 email=PREDEFINED_ADMIN_EMAIL,
+                username=PREDEFINED_ADMIN_USERNAME,
+                bio_name=PREDEFINED_ADMIN_BIONAME,
+                full_name=PREDEFINED_ADMIN_BIONAME,
                 password_hash=hash_password(PREDEFINED_ADMIN_PASS),
-                full_name=PREDEFINED_ADMIN_NAME,
                 role="admin",
                 is_active=True,
             )
             db.add(admin)
             db.commit()
-            logger.info("Seeded primary admin user: %s", PREDEFINED_ADMIN_EMAIL)
+            logger.info("Seeded primary admin user: %s (@%s)", PREDEFINED_ADMIN_EMAIL, PREDEFINED_ADMIN_USERNAME)
         else:
-            # Ensure privileges and active status
+            admin.email = PREDEFINED_ADMIN_EMAIL
+            admin.username = PREDEFINED_ADMIN_USERNAME
+            admin.bio_name = PREDEFINED_ADMIN_BIONAME
+            admin.full_name = PREDEFINED_ADMIN_BIONAME
             admin.role = "admin"
             admin.is_active = True
-            # Update password to ensure the requested password works
             admin.password_hash = hash_password(PREDEFINED_ADMIN_PASS)
             db.commit()
-            logger.info("Updated primary admin user: %s", PREDEFINED_ADMIN_EMAIL)
+            logger.info("Updated primary admin user: %s (@%s)", PREDEFINED_ADMIN_EMAIL, PREDEFINED_ADMIN_USERNAME)
     except Exception as exc:
         logger.error("Failed to seed admin user: %s", exc)
         db.rollback()

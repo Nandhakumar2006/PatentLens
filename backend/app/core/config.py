@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     FRONTEND_ORIGIN: str = "http://localhost:5173"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
     ADMIN_EMAILS: str = "nandhakumar2006@gmail.com"
+    ADMIN_ACTION_SECRET: str = "PatentLens2026"
 
     EMBEDDING_MODEL_NAME: str = "BAAI/bge-small-en-v1.5"
     EMBEDDING_BACKEND: str = "sentence-transformers"
